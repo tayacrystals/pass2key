@@ -129,7 +129,16 @@ tests/      development test programs
 vectors/    test vectors
 README.md   this file
 SPEC.md     the specification
+LICENSE     MIT licence
 ```
  
 Release archives include the source, the vendored dependencies, the
 specification, the test vectors and static binaries for common platforms.
+
+## License
+
+pass2key is released under the [MIT License](LICENSE).
+
+Monocypher in `vendor/` is dual-licensed 2-clause BSD or CC0-1.0 (see
+`vendor/monocypher/LICENCE.md`); pass2key uses the CC0-1.0 option, so
+redistributing pass2key adds no notice requirement beyond the MIT one.

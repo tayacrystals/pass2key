@@ -27,6 +27,33 @@ Options:
 
 Requirements at run time: a 64-bit system with at least 4 GiB of free memory. Derivation is deliberately slow; expect it to take several minutes.
 
+## Input normalization
+
+Both inputs are normalized before derivation, so trivial typing differences do
+not change the resulting key:
+
+| Input | Normalization |
+|-------|---------------|
+| Email | leading and trailing spaces and tabs removed; `A`-`Z` lowercased |
+| Passphrase | leading and trailing spaces and tabs removed; every run of spaces and tabs collapsed to a single space; `A`-`Z` lowercased |
+
+What this means in practice:
+
+- Both inputs are case-insensitive, and the passphrase ignores spacing
+  differences: `Correct   HORSE Battery  staple` derives the same key as
+  `correct horse battery staple`. Caps Lock, an autocapitalizing keyboard or an
+  editor that rewraps whitespace cannot cost you your key.
+- The email must contain exactly one `@`, with at least one character on each
+  side of it.
+- The passphrase must contain at least four words, separated by spaces or tabs.
+- Only printable ASCII (0x20-0x7E) is accepted, plus tabs as separators inside
+  the passphrase; anything else is rejected rather than silently altered.
+  Unicode normalization tables are large, and visually identical text can be
+  encoded as different bytes; Diceware words and essentially all email
+  addresses are ASCII.
+
+The normative rules are in [`SPEC.md`](SPEC.md).
+
 ## Choosing a passphrase
 
 Use [Diceware](https://theworld.com/~reinhold/diceware.html): roll real dice and pick words from a 7776-word list (e.g. the [EFF large wordlist](https://www.eff.org/dice)).

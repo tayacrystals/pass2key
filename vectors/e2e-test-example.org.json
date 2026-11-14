@@ -1,0 +1,7 @@
+{
+  "email": "test@example.org",
+  "passphrase": "correct horse battery staple",
+  "seed": "8b5bcb60e737f31017b6f0470870382e5efb2abc1c2b2f2f1b1ca4fecb7b5376",
+  "fingerprint": "56F0DCE8653661D1F0809D1C5A41A96CE232B7D6",
+  "armor": "e2e-test-example.org.asc"
+}

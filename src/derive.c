@@ -59,18 +59,19 @@ static int argon_selftest(void)
         return -1;
     }
 
+
     config.algorithm = CRYPTO_ARGON2_ID;
     config.nb_blocks = 32;
     config.nb_passes = 3;
     config.nb_lanes = 4;
     inputs.pass = password;
     inputs.salt = salt;
-    inputs.pass_size = sizeof(password);
-    inputs.salt_size = sizeof(salt);
+    inputs.pass_size = (uint32_t)sizeof(password);
+    inputs.salt_size = (uint32_t)sizeof(salt);
     extras.key = secret;
     extras.ad = ad;
-    extras.key_size = sizeof(secret);
-    extras.ad_size = sizeof(ad);
+    extras.key_size = (uint32_t)sizeof(secret);
+    extras.ad_size = (uint32_t)sizeof(ad);
 
     crypto_argon2(output, sizeof(output), work_area, config, inputs, extras);
     result = memcmp(output, expected, sizeof(expected)) == 0 ? 0 : -1;
@@ -81,6 +82,10 @@ static int argon_selftest(void)
     }
     crypto_wipe(work_area, 32 * 1024);
     free(work_area);
+    crypto_wipe(password, sizeof(password));
+    crypto_wipe(salt, sizeof(salt));
+    crypto_wipe(secret, sizeof(secret));
+    crypto_wipe(ad, sizeof(ad));
     return result;
 }
 
@@ -134,19 +139,56 @@ static int ed25519_selftest(void)
 
 static int sha1_selftest(void)
 {
-    static const uint8_t expected[20] = {
-        0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a,
-        0xba, 0x3e, 0x25, 0x71, 0x78, 0x50, 0xc2, 0x6c,
-        0x9c, 0xd0, 0xd8, 0x9d
+    /* 56 bytes hits the two-block padding branch (used > 56), 112 bytes spans
+       three blocks. Both are fed in one call and byte by byte, so the block
+       boundary in sha1_update is exercised too. */
+    static const char message56[] =
+        "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+    static const char message112[] =
+        "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmno"
+        "ijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu";
+    static const struct {
+        const char *label;
+        const char *message;
+        uint8_t expected[20];
+    } vectors[] = {
+        {"abc", "abc",
+         {0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a,
+          0xba, 0x3e, 0x25, 0x71, 0x78, 0x50, 0xc2, 0x6c,
+          0x9c, 0xd0, 0xd8, 0x9d}},
+        {"56-byte", message56,
+         {0x84, 0x98, 0x3e, 0x44, 0x1c, 0x3b, 0xd2, 0x6e,
+          0xba, 0xae, 0x4a, 0xa1, 0xf9, 0x51, 0x29, 0xe5,
+          0xe5, 0x46, 0x70, 0xf1}},
+        {"112-byte", message112,
+         {0xa4, 0x9b, 0x24, 0x46, 0xa0, 0x2c, 0x64, 0x5b,
+          0xf4, 0x19, 0xf9, 0x95, 0xb6, 0x70, 0x91, 0x25,
+          0x3a, 0x04, 0xa2, 0x59}}
     };
     uint8_t digest[20];
+    uint8_t bytewise[20];
+    size_t i;
+    size_t j;
+    int result = 0;
 
-    sha1(digest, "abc", 3);
-    if (memcmp(digest, expected, sizeof(expected)) != 0) {
-        fprintf(stderr, "selftest: SHA-1 vector failed\n");
-        return -1;
+    for (i = 0; i < sizeof(vectors) / sizeof(vectors[0]); i++) {
+        const uint8_t *message = (const uint8_t *)vectors[i].message;
+        size_t len = strlen(vectors[i].message);
+        Sha1Ctx ctx;
+
+        sha1(digest, message, len);
+        sha1_init(&ctx);
+        for (j = 0; j < len; j++)
+            sha1_update(&ctx, message + j, 1);
+        sha1_final(&ctx, bytewise);
+        if (memcmp(digest, vectors[i].expected, sizeof(digest)) != 0 ||
+            memcmp(bytewise, vectors[i].expected, sizeof(bytewise)) != 0) {
+            fprintf(stderr, "selftest: SHA-1 %s vector failed\n",
+                    vectors[i].label);
+            result = -1;
+        }
     }
-    return 0;
+    return result;
 }
 
 int derive_selftest(void)
@@ -163,7 +205,14 @@ int derive_selftest(void)
 int derive_seed(uint8_t seed[32], const char *email,
                 const char *passphrase)
 {
-    size_t email_len = strlen(email);
+    size_t email_len;
+
+    if (seed == NULL || email == NULL || passphrase == NULL) {
+        fprintf(stderr, "pass2key: derive_seed called with a null argument\n");
+        return -1;
+    }
+
+    email_len = strlen(email);
     size_t password_len = strlen(passphrase);
     size_t salt_len;
     uint8_t *salt;

@@ -4,6 +4,10 @@
 
 static uint32_t rol32(uint32_t value, unsigned int shift)
 {
+    /* shift is never 0 in this file; keep the definition safe anyway so a
+       future call site cannot introduce a shift by 32 (undefined). */
+    if (shift == 0)
+        return value;
     return (value << shift) | (value >> (32 - shift));
 }
 

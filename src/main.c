@@ -1,5 +1,8 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "armor.h"
 #include "buffer.h"
+#include "cli.h"
 #include "derive.h"
 #include "input.h"
 #include "monocypher.h"
@@ -9,13 +12,19 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(__unix__) || defined(__APPLE__)
+#include <sys/resource.h>
+#endif
+#if defined(__linux__)
+#include <sys/prctl.h>
+#endif
+
 typedef struct {
     const char *email;
     const char *expected;
     int expected_set;
     int public_only;
     int selftest;
-    int help;
 } Options;
 
 static void usage(FILE *stream)
@@ -31,40 +40,31 @@ static void usage(FILE *stream)
             "  --public              output the public key only\n"
             "  --expect FINGERPRINT  fail without output unless the fingerprint matches\n"
             "  --selftest            run primitive self-tests\n"
-            "  -h, --help            show this help\n");
+            "  -h, --help            show this help\n"
+            "\n"
+            "If standard input is not a terminal the passphrase is read from it\n"
+            "without a prompt; otherwise it is prompted for with echo disabled.\n"
+            "\n"
+            "Exit status: 0 success, 2 usage error, 1 any other failure\n"
+            "(including a fingerprint mismatch and an invalid passphrase).\n");
 }
 
-static int parse_hex_fingerprint(const char *text,
-                                 uint8_t fingerprint[PASS2KEY_FINGERPRINT_LEN])
+/* A core dump, a ptrace attach or swap-out during the several-minute
+   derivation would expose the passphrase and the derived private key. Core
+   dumps are disabled for the whole process; the 4 GiB work area is not
+   locked and can still be swapped, which is documented in the README. */
+static void harden_process(void)
 {
-    size_t digits = 0;
-    const char *p;
+#if defined(__unix__) || defined(__APPLE__)
+    struct rlimit limit;
 
-    for (p = text; *p != '\0'; p++) {
-        int value = 0;
-        char c = *p;
-
-        if (c == ' ')
-            continue;
-        if (c >= '0' && c <= '9')
-            value = c - '0';
-        else if (c >= 'a' && c <= 'f')
-            value = c - 'a' + 10;
-        else if (c >= 'A' && c <= 'F')
-            value = c - 'A' + 10;
-        else
-            return -1;
-
-        if (digits >= 2 * PASS2KEY_FINGERPRINT_LEN)
-            return -1;
-        if (digits % 2 == 0)
-            fingerprint[digits / 2] = (uint8_t)(value << 4);
-        else
-            fingerprint[digits / 2] |= (uint8_t)value;
-        digits++;
-    }
-
-    return digits == 2 * PASS2KEY_FINGERPRINT_LEN ? 0 : -1;
+    limit.rlim_cur = 0;
+    limit.rlim_max = 0;
+    (void)setrlimit(RLIMIT_CORE, &limit);
+#endif
+#if defined(__linux__)
+    (void)prctl(PR_SET_DUMPABLE, 0);
+#endif
 }
 
 static int parse_options(int argc, char **argv, Options *options)
@@ -88,10 +88,6 @@ static int parse_options(int argc, char **argv, Options *options)
             }
             if (strcmp(arg, "--selftest") == 0) {
                 options->selftest = 1;
-                continue;
-            }
-            if (strcmp(arg, "-h") == 0 || strcmp(arg, "--help") == 0) {
-                options->help = 1;
                 continue;
             }
             if (strcmp(arg, "--expect") == 0) {
@@ -143,14 +139,24 @@ int main(int argc, char **argv)
     Buffer packets = {0};
     int status = 1;
     int read_status;
+    int i;
+
+    harden_process();
+
+    /* --help wins over any other argument, including a malformed one, but not
+       over an explicit end-of-options marker. */
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--") == 0)
+            break;
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            usage(stdout);
+            return 0;
+        }
+    }
 
     if (parse_options(argc, argv, &options) != 0) {
         usage(stderr);
         return 2;
-    }
-    if (options.help) {
-        usage(stdout);
-        return 0;
     }
     if (options.selftest) {
         if (options.email != NULL || options.expected_set ||
@@ -169,9 +175,10 @@ int main(int argc, char **argv)
         return 2;
     }
     if (options.expected_set &&
-        parse_hex_fingerprint(options.expected, expected) != 0) {
+        cli_parse_hex_fingerprint(options.expected, expected) != 0) {
         fprintf(stderr,
                 "pass2key: --expect requires 40 hexadecimal digits (spaces allowed)\n");
+        usage(stderr);
         return 2;
     }
 
@@ -187,6 +194,9 @@ int main(int argc, char **argv)
             fprintf(stderr, "pass2key: no passphrase was provided\n");
         else if (read_status == -2)
             fprintf(stderr, "pass2key: cannot read the passphrase\n");
+        else if (read_status == -5)
+            fprintf(stderr,
+                    "pass2key: cannot disable terminal echo; refusing to read the passphrase\n");
         else
             fprintf(stderr, "pass2key: cannot prompt for the passphrase\n");
         goto done;
@@ -239,9 +249,11 @@ done:
         free(raw_passphrase);
     }
     if (passphrase != NULL) {
-        crypto_wipe(passphrase, strlen(passphrase));
+        /* +1 covers the terminating NUL, which normalize_passphrase allocates. */
+        crypto_wipe(passphrase, strlen(passphrase) + 1);
         free(passphrase);
     }
+    crypto_wipe(seed, sizeof(seed));
     free(email);
     crypto_wipe(expected, sizeof(expected));
     crypto_wipe(fingerprint, sizeof(fingerprint));

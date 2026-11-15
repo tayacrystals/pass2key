@@ -101,10 +101,17 @@ int buffer_u32be(Buffer *buf, uint32_t value)
     return buffer_append(buf, bytes, sizeof(bytes));
 }
 
+/* An MPI bit count is a 16-bit field, so at most 8191 bytes can be encoded.
+   Reject anything longer instead of silently truncating the bit count. */
+#define MPI_MAX_BYTES 8191
+
 int buffer_mpi(Buffer *buf, const uint8_t *data, size_t len)
 {
     uint16_t bits;
     size_t first = 0;
+
+    if (len > MPI_MAX_BYTES)
+        return -1;
 
     while (first < len && data[first] == 0)
         first++;

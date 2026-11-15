@@ -15,17 +15,30 @@ pass2key you@example.org > key.asc
 gpg --import key.asc
 ```
 
-> `pass2key` will interactively prompt for the passphrase
+`pass2key` prompts for the passphrase with terminal echo disabled. If standard
+input is not a terminal it reads the passphrase from standard input instead and
+says so on standard error; there is no prompt then. That is how scripts feed it,
+but note that `echo passphrase | pass2key ...` leaves the passphrase in your
+shell history, so prefer a here-document or a file with restricted permissions.
 
 Options:
 
 | Option | Effect |
 |--------|--------|
 | `--public` | Output the public key only |
-| `--expect <fingerprint>` | Check the derived key against your known fingerprint; output nothing and fail if it differs (e.g. a typo in the passphrase) |
-| `--selftest` | Run a self-test against known values |
+| `--expect <fingerprint>` | Check the derived key against your known fingerprint; output nothing and fail if it differs (e.g. a typo in the passphrase). Spaces are ignored and hex letters may be either case |
+| `--selftest` | Run a self-test against known values; must be the only argument |
+| `-h`, `--help` | Print usage and exit successfully |
+| `--` | End of options; every later argument is treated as the email |
 
-Requirements at run time: a 64-bit system with at least 4 GiB of free memory. Derivation is deliberately slow; expect it to take several minutes.
+Exit status: `0` on success, `2` for a usage error (unknown option, missing or
+malformed argument, invalid email) and `1` for every other failure, including
+an invalid passphrase and a `--expect` mismatch.
+
+Requirements at run time: a 64-bit POSIX system with at least 4 GiB of free
+memory. Derivation is deliberately slow; expect it to take several minutes. Pressing
+Ctrl-C during the derivation aborts the run and writes nothing to standard
+output, but the work is lost.
 
 ## Input normalization
 
@@ -82,8 +95,13 @@ gpg --armor --export "$FPR" > public.asc      # publish this
 gpg --export-secret-subkeys "$FPR" > subkeys.gpg
 gpg --delete-secret-keys "$FPR"
 gpg --import subkeys.gpg                       # primary is now offline-only
-shred -u primary.asc subkeys.gpg
+rm primary.asc subkeys.gpg
 ```
+
+`shred` and friends cannot reliably erase data on SSDs, journaling filesystems
+or copy-on-write storage, so it is not recommended here. What matters is that
+the files are gone from the machine's reachable storage; the key itself can
+always be re-derived from the passphrase.
 
 **Later (renew subkeys, revoke, etc)**
  
@@ -94,8 +112,13 @@ Pass your fingerprint with `--expect`, so a mistyped passphrase gives a clear
 error instead of a different, valid-looking key:
 
 ```sh
-pass2key --expect "$FPR" you@example.org > primary.asc
+pass2key --expect "$FPR" you@example.org > primary.asc.tmp &&
+    mv primary.asc.tmp primary.asc
 ```
+
+The temporary file matters: the shell truncates `primary.asc` before `pass2key`
+runs, so a plain redirect would destroy an existing key file when the check
+fails. `set -o noclobber` has the same effect.
 
 Note your fingerprint somewhere after the initial setup. It is public, so it
 can be kept anywhere (and it is also on keyservers and in your contacts'
@@ -128,39 +151,71 @@ over time, so the margin of a 4-word passphrase shrinks over decades. The
 email acts as a per-user salt, so an attacker cannot crack many users at
 once: every target needs its own full search.
  
+**Process hygiene.** Core dumps are disabled for the process (`RLIMIT_CORE` 0,
+and `PR_SET_DUMPABLE` 0 on Linux) so a crash during the derivation cannot leave
+the passphrase and the private key in a core file. The 4 GiB Argon2 work area is
+not `mlock`ed and can be swapped to disk; if that matters to you, run the tool
+inside an encrypted swap or with `mlockall` limits raised. Buffers holding the
+passphrase, the seed and the secret key are wiped with a non-eliminable write
+before they are freed.
+
 **What this tool does not protect against:**
  
 - A weak, reused or human-chosen passphrase.
 - Malware on the machine where you run it.
 - You writing down, or otherwise leaking your passphrase.
 - You forgetting your passphrase.
+- Anyone reading swap or memory while the derivation runs.
 
 ## Building
  
 The only dependency is [Monocypher](https://monocypher.org), vendored in
 `vendor/`. Any C99 compiler works:
- 
+
 ```sh
-cc -std=c99 -O2 -o pass2key \
-   src/*.c vendor/monocypher/monocypher.c \
-   vendor/monocypher/monocypher-ed25519.c
-./pass2key --selftest
+make                 # builds build/pass2key
+make check           # unit tests, vector comparison, CLI and PTY tests
+./build/pass2key --selftest
 ```
- 
+
+`make check` takes a few seconds and needs no Argon2 derivation. It needs
+`python3` (for the PTY tests) and `sha256sum`; the C tests and the vector
+comparison run without either. The full production derivation is checked
+separately, because it needs 4 GiB and several minutes per run:
+
+```sh
+make check-slow      # derives twice: vector must match byte for byte,
+                     # and a wrong --expect must write nothing
+```
+
+Without `make`, the equivalent single command (note the include path, which is
+required because the sources include `monocypher.h` by quoted name):
+
+```sh
+cc -std=c99 -O2 -Ivendor/monocypher -o pass2key \
+   src/*.c vendor/monocypher/*.c
+```
+
+`CFLAGS` from the environment is respected, and the C99 dialect, warning flags
+and `-Isrc` are appended to it. Passing `CFLAGS` on the `make` command line
+replaces all of that, so add the include flags yourself in that case.
+
 Layout:
- 
+
 ```
-src/        pass2key source (main, OpenPGP packets, armor, SHA-1)
-vendor/     Monocypher 4.x (Argon2id, Ed25519, SHA-512), unmodified
-tests/      development test programs
-vectors/    test vectors
+src/        pass2key source (main, OpenPGP packets, armor, SHA-1, CLI parsing)
+vendor/     Monocypher 4.0.3 (Argon2id, Ed25519, SHA-512), unmodified
+tests/      unit tests, vector tests, CLI and PTY tests
+tests/check.h  CHECK macro that survives -DNDEBUG
+vectors/    test vectors (end-to-end private and public output)
 README.md   this file
 SPEC.md     the specification
 LICENSE     MIT licence
 ```
- 
-Release archives include the source, the vendored dependencies, the
-specification, the test vectors and static binaries for common platforms.
+
+There is no CI configuration and no release script in this repository; releases
+are produced by running `make check` and `make check-slow` on a clean checkout
+and archiving the source tree. Static binaries are not built here.
 
 ## License
 

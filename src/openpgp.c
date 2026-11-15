@@ -41,8 +41,10 @@ static int append_packet(Buffer *output, uint8_t tag, const Buffer *body)
         header[2] = (uint8_t)adjusted;
         header_len = 3;
     } else {
+#if SIZE_MAX > UINT32_MAX
         if (len > UINT32_MAX)
             return -1;
+#endif
         header[0] = (uint8_t)(0xc0 | tag);
         header[1] = 0xff;
         header[2] = (uint8_t)(len >> 24);
@@ -74,8 +76,10 @@ static int append_subpacket(Buffer *output, uint8_t type,
         header[1] = (uint8_t)adjusted;
         header_len = 2;
     } else {
+#if SIZE_MAX > UINT32_MAX
         if (sub_len > UINT32_MAX)
             return -1;
+#endif
         header[0] = 0xff;
         header[1] = (uint8_t)(sub_len >> 24);
         header[2] = (uint8_t)(sub_len >> 16);
@@ -291,7 +295,7 @@ done:
     return result;
 }
 
-int openpgp_build(Buffer *output, const char *email, uint8_t seed[32],
+int openpgp_build(Buffer *output, const char *email, const uint8_t seed[32],
                   int public_only,
                   uint8_t fingerprint[PASS2KEY_FINGERPRINT_LEN])
 {
@@ -307,10 +311,12 @@ int openpgp_build(Buffer *output, const char *email, uint8_t seed[32],
     buffer_init(&public_key);
     buffer_init(&body);
 
+#if SIZE_MAX > UINT32_MAX
     if (email_len > UINT32_MAX) {
         fprintf(stderr, "pass2key: email address is too long\n");
         goto done;
     }
+#endif
 
     memcpy(key_seed, seed, sizeof(key_seed));
     crypto_ed25519_key_pair(signing_key, public_key_bytes, key_seed);
@@ -361,7 +367,8 @@ int openpgp_build(Buffer *output, const char *email, uint8_t seed[32],
 
     result = 0;
 done:
-    crypto_wipe(seed, 32);
+    /* The caller keeps ownership of seed; only the internal copy is wiped. */
+    crypto_wipe(key_seed, sizeof(key_seed));
     crypto_wipe(signing_key, sizeof(signing_key));
     crypto_wipe(public_key_bytes, sizeof(public_key_bytes));
     buffer_free(&public_key);

@@ -16,8 +16,19 @@
 static volatile sig_atomic_t caught_signal;
 
 #if !defined(_WIN32)
+static const int terminal_signals[] = {
+    SIGINT, SIGTERM, SIGHUP, SIGQUIT
+};
+
+#define TERMINAL_SIGNAL_COUNT \
+    (sizeof(terminal_signals) / sizeof(terminal_signals[0]))
+
 static struct termios saved_termios;
 static int echo_disabled;
+static struct sigaction saved_actions[TERMINAL_SIGNAL_COUNT];
+static int saved_action_valid[TERMINAL_SIGNAL_COUNT];
+static sigset_t saved_mask;
+static int saved_mask_valid;
 
 static void restore_terminal(void)
 {
@@ -32,46 +43,71 @@ static void record_signal(int signal_number)
     caught_signal = signal_number;
 }
 
-static void set_terminal_signal_handler(void (*handler)(int))
+/* Installs the handler for every signal whose inherited disposition is not
+   SIG_IGN, remembering both the disposition and the signal mask so the
+   caller's environment is restored exactly. A signal the parent deliberately
+   ignored (nohup, shell background jobs) is left ignored. */
+static void install_terminal_signal_handlers(void)
 {
-    static const int terminal_signals[] = {
-        SIGINT, SIGTERM, SIGHUP, SIGQUIT
-    };
     struct sigaction action;
     size_t i;
 
+    caught_signal = 0;
     memset(&action, 0, sizeof(action));
-    action.sa_handler = handler;
+    action.sa_handler = record_signal;
     sigemptyset(&action.sa_mask);
     action.sa_flags = 0;
 
-    for (i = 0; i < sizeof(terminal_signals) / sizeof(terminal_signals[0]);
-         i++)
-        (void)sigaction(terminal_signals[i], &action, NULL);
-}
+    for (i = 0; i < TERMINAL_SIGNAL_COUNT; i++) {
+        struct sigaction previous;
 
-static void install_terminal_handlers(void)
-{
-    caught_signal = 0;
-    set_terminal_signal_handler(record_signal);
+        saved_action_valid[i] = 0;
+        if (sigaction(terminal_signals[i], NULL, &previous) != 0)
+            continue;
+        if (previous.sa_handler == SIG_IGN)
+            continue;
+        if (sigaction(terminal_signals[i], &action, &previous) == 0) {
+            saved_actions[i] = previous;
+            saved_action_valid[i] = 1;
+        }
+    }
+
+    saved_mask_valid = sigprocmask(SIG_BLOCK, NULL, &saved_mask) == 0;
 }
 
 static void restore_signal_handlers(void)
 {
-    set_terminal_signal_handler(SIG_DFL);
+    size_t i;
+
+    for (i = 0; i < TERMINAL_SIGNAL_COUNT; i++) {
+        if (saved_action_valid[i]) {
+            (void)sigaction(terminal_signals[i], &saved_actions[i], NULL);
+            saved_action_valid[i] = 0;
+        }
+    }
+    if (saved_mask_valid) {
+        (void)sigprocmask(SIG_SETMASK, &saved_mask, NULL);
+        saved_mask_valid = 0;
+    }
 }
 
-static void disable_echo(void)
+/* Returns 0 on success and -1 if echo cannot be turned off. Callers must not
+   ask for a passphrase when echo remains enabled. */
+static int disable_echo(void)
 {
     struct termios hidden;
 
     if (!isatty(STDIN_FILENO) || tcgetattr(STDIN_FILENO, &saved_termios) != 0)
-        return;
+        return -1;
 
     hidden = saved_termios;
     hidden.c_lflag &= (tcflag_t)~ECHO;
-    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &hidden) == 0)
-        echo_disabled = 1;
+    /* TCSANOW keeps bytes the user typed ahead; the prompt is printed only
+       after echo is off, so nothing that could be the passphrase is lost. */
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &hidden) != 0)
+        return -1;
+    echo_disabled = 1;
+    return 0;
 }
 #endif
 
@@ -213,19 +249,36 @@ int read_passphrase(unsigned char **output, size_t *output_len)
     int result = -1;
     int eof = 0;
     int interactive = isatty(STDIN_FILENO);
+    FILE *prompt = stderr;
+    int prompt_owned = 0;
 
-    if (interactive &&
-        (fputs("Passphrase: ", stderr) == EOF || fflush(stderr) != 0))
-        return -1;
-
+    if (!interactive) {
+        if (fprintf(stderr,
+                    "pass2key: reading passphrase from standard input\n") < 0 ||
+            fflush(stderr) != 0)
+            return -1;
+    } else {
 #if !defined(_WIN32)
-    if (interactive) {
-        install_terminal_handlers();
-        disable_echo();
-    }
-#else
-    (void)interactive;
+        install_terminal_signal_handlers();
+        if (disable_echo() != 0) {
+            result = -5;
+            goto finish;
+        }
 #endif
+        /* Keep the prompt visible when stderr is redirected. */
+        if (!isatty(STDERR_FILENO)) {
+            FILE *tty = fopen("/dev/tty", "w");
+
+            if (tty != NULL) {
+                prompt = tty;
+                prompt_owned = 1;
+            }
+        }
+        if (fputs("Passphrase: ", prompt) == EOF || fflush(prompt) != 0) {
+            result = -1;
+            goto finish;
+        }
+    }
 
     for (;;) {
         unsigned char byte;
@@ -304,6 +357,8 @@ finish:
         (void)fflush(stderr);
     }
 #endif
+    if (prompt_owned)
+        (void)fclose(prompt);
     if (line != NULL) {
         crypto_wipe(line, cap + 1);
         free(line);
@@ -312,18 +367,19 @@ finish:
     if (interactive) {
         sigset_t blocked;
         int pending_signal;
+        size_t i;
 
-        sigemptyset(&blocked);
-        sigaddset(&blocked, SIGINT);
-        sigaddset(&blocked, SIGTERM);
-        sigaddset(&blocked, SIGHUP);
-        sigaddset(&blocked, SIGQUIT);
-        (void)sigprocmask(SIG_BLOCK, &blocked, NULL);
-        pending_signal = (int)caught_signal;
+        /* Restore the caller's dispositions and mask first, so the re-raise
+           below behaves exactly as the inherited environment would. */
         restore_signal_handlers();
-        (void)sigprocmask(SIG_UNBLOCK, &blocked, NULL);
-
+        pending_signal = (int)caught_signal;
         if (pending_signal != 0) {
+            sigemptyset(&blocked);
+            for (i = 0; i < TERMINAL_SIGNAL_COUNT; i++)
+                sigaddset(&blocked, terminal_signals[i]);
+            /* Do not let a mask inherited from the parent turn the re-raise
+               into a hang: this process is about to die from this signal. */
+            (void)sigprocmask(SIG_UNBLOCK, &blocked, NULL);
             (void)raise(pending_signal);
             result = -4;
         }

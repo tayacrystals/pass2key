@@ -1,3 +1,4 @@
 build/
+/pass2key
 *.o
 *.d

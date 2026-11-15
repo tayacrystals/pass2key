@@ -84,6 +84,11 @@ int armor_write(FILE *stream, const uint8_t *data, size_t len,
         ? "-----END PGP PUBLIC KEY BLOCK-----\n"
         : "-----END PGP PRIVATE KEY BLOCK-----\n";
 
+    /* Output is written through stdio with "\n"; on a platform that
+       translates LF to CRLF in text mode the result violates the LF-only
+       requirement. pass2key therefore targets POSIX systems. */
+    if (len == 0)
+        return -1;
     if (fputs(begin, stream) == EOF)
         return -1;
     if (fputc('\n', stream) == EOF)

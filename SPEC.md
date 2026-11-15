@@ -6,14 +6,19 @@ big-endian.
  
 ### 1. Inputs
  
-Both inputs must consist of **printable ASCII only** (0x20–0x7E). Other input
-is rejected, not silently changed.
- 
+Both inputs must consist of **printable ASCII** (0x20–0x7E) plus the tab
+(0x09). Tabs are separators: they may appear anywhere in the passphrase and
+only at the ends of the email. Every other byte, including DEL (0x7F) and any
+byte above 0x7E, is rejected, not silently changed.
+
 **Email** (`E`):
- 
+
 1. Remove leading and trailing spaces and tabs.
 2. Convert `A`–`Z` to `a`–`z`.
 3. Must contain exactly one `@`, with at least one character before and after it.
+4. The remaining bytes are used verbatim: there is no interior whitespace
+   normalization and no further validation. In particular `a@b c` is accepted
+   as-is, while a tab inside the email is rejected.
 **Passphrase** (`P`):
  
 1. Remove leading and trailing spaces and tabs.
@@ -64,8 +69,11 @@ The MPI has a bit count of 263 (`0x01 0x07`).
  
 **Secret-Key packet (tag 5):**
 `PK || 0x00 || MPI(seed) || checksum`, where `0x00` means "not encrypted",
-`MPI(seed)` is the seed as an MPI (leading zero bits stripped) and `checksum`
-is the sum of the MPI's bytes modulo 65536.
+`MPI(seed)` is the seed as an MPI (whole leading zero octets dropped, length
+field set to the exact bit count) and `checksum` is the sum modulo 65536 of
+the MPI's bytes **including its two-octet bit-count prefix**, but not of the
+`0x00` octet. For the vector in `vectors/` the sum of the 32 seed octets is
+`0x0DE0` and the encoded checksum is `0x0DE1`.
  
 **User ID packet (tag 13):** the bytes of `E`.
  
@@ -95,8 +103,9 @@ H = SHA-512( 0x99 || len16(PK) || PK
           || 0x04 || 0xFF || len32(sig_header_and_hashed_subpackets) )
 ```
  
-The Ed25519 signature over `H` (as a 64-byte message) gives `R || S`, encoded
-as `MPI(R) || MPI(S)` after the two leftmost bytes of `H`.
+The Ed25519 signature over `H` (as a 64-byte message) gives `R || S`. The
+signature packet carries the two leftmost bytes of `H` first (the v4 "left 16
+bits of the signed hash" field, RFC 4880 §5.2.3), then `MPI(R) || MPI(S)`.
  
 **Output order:** Secret-Key packet, User ID packet, Signature packet.
 With `--public`, the Secret-Key packet is replaced by a Public-Key packet
